@@ -595,7 +595,7 @@ variable "runner_additional_security_group_ids" {
 variable "instance_target_capacity_type" {
   description = "Default lifecycle used for runner instances, can be either `spot` or `on-demand`."
   type        = string
-  default     = "spot"
+  default     = "on-demand"
   validation {
     condition     = contains(["spot", "on-demand"], var.instance_target_capacity_type)
     error_message = "The instance target capacity should be either spot or on-demand."
