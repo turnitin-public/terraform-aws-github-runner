@@ -18,7 +18,7 @@ This [Terraform](https://www.terraform.io/) module creates the required infrastr
 
 - Scaling: Scale up and down based on GitHub events
 - Sustainability: Scale down to zero when no jobs are running
-- Security: Runners are created on-demand and terminated after use (ephemeral runners)
+- Security: Runners are created on-demand and terminated after use ( ephemeral runners )
 - Cost optimization: Runners are created on spot instances
 - Tailored software, hardware and network configuration: Bring your own AMI, define the instance types and subnets to use.
 - OS support: Linux (x64/arm64) and Windows
