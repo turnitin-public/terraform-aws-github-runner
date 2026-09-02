@@ -1,26 +1,34 @@
 import type { Octokit } from '@octokit/rest';
 import type { CreateGitHubRunnerConfig, CreateStartRunnerConfig, RunnerInfo } from '../../../../core';
-import { bootTimeExceeded, listEC2Runners } from '../runners';
-import { calculateEc2PoolSize, createEc2PoolProvider } from './pool';
-import { createRunners, type Ec2ProviderConfig, loadEc2ProviderConfig } from './runner-config';
+import { bootTimeExceeded, type Ec2RunnerResourceOperations } from '../runners';
+import { createEc2PoolCapability } from './pool';
+import { createRunners, type Ec2ProviderConfig, loadEc2ProviderConfig } from './runner-creation';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../runners', () => ({
   bootTimeExceeded: vi.fn(),
-  listEC2Runners: vi.fn(),
 }));
 
-vi.mock('./runner-config', () => ({
+vi.mock('./runner-creation', () => ({
   createRunners: vi.fn(),
   loadEc2ProviderConfig: vi.fn(),
 }));
 
 const mockBootTimeExceeded = vi.mocked(bootTimeExceeded);
-const mockListRunners = vi.mocked(listEC2Runners);
 const mockCreateRunners = vi.mocked(createRunners);
 const mockLoadProviderConfig = vi.mocked(loadEc2ProviderConfig);
 
-describe('calculateEc2PoolSize', () => {
+const ec2Operations = {
+  list: vi.fn<Ec2RunnerResourceOperations['list']>(),
+  create: vi.fn<Ec2RunnerResourceOperations['create']>(),
+  terminate: vi.fn<Ec2RunnerResourceOperations['terminate']>(),
+  tag: vi.fn<Ec2RunnerResourceOperations['tag']>(),
+  untag: vi.fn<Ec2RunnerResourceOperations['untag']>(),
+} satisfies Ec2RunnerResourceOperations;
+const createStartRunnerConfig = vi.fn<CreateStartRunnerConfig>();
+const capability = createEc2PoolCapability(ec2Operations, createStartRunnerConfig);
+
+describe('createEc2PoolCapability.countAvailableRunners', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -29,7 +37,7 @@ describe('calculateEc2PoolSize', () => {
     const runners: RunnerInfo[] = [{ id: 'i-idle', owner: 'owner', type: 'Org' }];
     const runnerStatus = new Map([['i-idle', { busy: false, status: 'online' }]]);
 
-    expect(calculateEc2PoolSize(runners, runnerStatus)).toBe(1);
+    expect(capability.countAvailableRunners(runners, runnerStatus)).toBe(1);
     expect(mockBootTimeExceeded).not.toHaveBeenCalled();
   });
 
@@ -43,7 +51,7 @@ describe('calculateEc2PoolSize', () => {
       ['i-offline', { busy: false, status: 'offline' }],
     ]);
 
-    expect(calculateEc2PoolSize(runners, runnerStatus)).toBe(0);
+    expect(capability.countAvailableRunners(runners, runnerStatus)).toBe(0);
     expect(mockBootTimeExceeded).not.toHaveBeenCalled();
   });
 
@@ -51,7 +59,7 @@ describe('calculateEc2PoolSize', () => {
     const runners: RunnerInfo[] = [{ id: 'i-busy', owner: 'owner', type: 'Org' }];
     const runnerStatus = new Map([['i-busy', { busy: true, status: 'online' }]]);
 
-    expect(calculateEc2PoolSize(runners, runnerStatus, true)).toBe(1);
+    expect(capability.countAvailableRunners(runners, runnerStatus, true)).toBe(1);
     expect(mockBootTimeExceeded).not.toHaveBeenCalled();
   });
 
@@ -59,19 +67,43 @@ describe('calculateEc2PoolSize', () => {
     const runners: RunnerInfo[] = [{ id: 'i-booting', owner: 'owner', type: 'Org' }];
     mockBootTimeExceeded.mockReturnValue(false);
 
-    expect(calculateEc2PoolSize(runners, new Map())).toBe(1);
+    expect(capability.countAvailableRunners(runners, new Map())).toBe(1);
   });
 
   it('does not count unregistered runners whose boot time expired', () => {
     const runners: RunnerInfo[] = [{ id: 'i-expired', owner: 'owner', type: 'Org' }];
     mockBootTimeExceeded.mockReturnValue(true);
 
-    expect(calculateEc2PoolSize(runners, new Map())).toBe(0);
+    expect(capability.countAvailableRunners(runners, new Map())).toBe(0);
   });
 });
 
-describe('createEc2PoolProvider', () => {
-  const createStartRunnerConfig = vi.fn<CreateStartRunnerConfig>();
+describe('createEc2PoolCapability.listRunners', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('lists only running instances managed for the requested pool', async () => {
+    const runners: RunnerInfo[] = [{ id: 'i-running', owner: 'owner', type: 'Org' }];
+    ec2Operations.list.mockResolvedValue(runners);
+
+    await expect(
+      capability.listRunners({
+        environment: 'test-environment',
+        runnerOwner: 'owner',
+        runnerType: 'Org',
+      }),
+    ).resolves.toBe(runners);
+    expect(ec2Operations.list).toHaveBeenCalledWith({
+      environment: 'test-environment',
+      runnerOwner: 'owner',
+      runnerType: 'Org',
+      statuses: ['running'],
+    });
+  });
+});
+
+describe('createEc2PoolCapability.createRunners', () => {
   const githubInstallationClient = {} as Octokit;
   const githubRunnerConfig: CreateGitHubRunnerConfig = {
     ephemeral: true,
@@ -105,42 +137,22 @@ describe('createEc2PoolProvider', () => {
     mockLoadProviderConfig.mockReturnValue(providerConfig);
   });
 
-  it('lists only running instances managed for the requested pool', async () => {
-    const runners: RunnerInfo[] = [{ id: 'i-running', owner: 'owner', type: 'Org' }];
-    mockListRunners.mockResolvedValue(runners);
-    const provider = createEc2PoolProvider(createStartRunnerConfig);
-
-    await expect(
-      provider.listRunners({
-        environment: 'test-environment',
-        runnerOwner: 'owner',
-        runnerType: 'Org',
-      }),
-    ).resolves.toBe(runners);
-    expect(mockListRunners).toHaveBeenCalledWith({
-      environment: 'test-environment',
-      runnerOwner: 'owner',
-      runnerType: 'Org',
-      statuses: ['running'],
-    });
-  });
-
   it('creates pool runners with the pool source and returns their instance IDs', async () => {
     mockCreateRunners.mockResolvedValue({
       instances: ['i-created'],
       retryableErrorCount: 0,
       nonRetryableErrorCount: 0,
     });
-    const provider = createEc2PoolProvider(createStartRunnerConfig);
 
     await expect(
-      provider.createRunners({
+      capability.createRunners({
         githubRunnerConfig,
         numberOfRunners: 1,
         githubInstallationClient,
       }),
     ).resolves.toEqual(['i-created']);
     expect(mockCreateRunners).toHaveBeenCalledWith(
+      ec2Operations,
       githubRunnerConfig,
       providerConfig,
       1,
