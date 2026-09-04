@@ -9,6 +9,7 @@ import {
   DeleteTagsCommand,
   DescribeInstancesCommand,
   type DescribeInstancesResult,
+  DescribeLaunchTemplateVersionsCommand,
   EC2Client,
   FleetOnDemandAllocationStrategy,
   RunInstancesCommand,
@@ -21,13 +22,14 @@ import { mockClient } from 'aws-sdk-client-mock';
 import 'aws-sdk-client-mock-jest/vitest';
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { LambdaRunnerSource, RunnerInfo, RunnerType } from '../../../../core';
-import { createRunner, listEC2Runners, tag, terminateRunner, untag } from './runners';
+import type { RunnerInfo, RunnerSource, RunnerType } from '../../../core';
+import { createEc2RunnerClient } from './runners';
 import type { Ec2OverrideConfig, RunnerInputParameters } from './runners.d';
 
 process.env.AWS_REGION = 'eu-east-1';
 const mockEC2Client = mockClient(EC2Client);
 const mockSSMClient = mockClient(SSMClient);
+const ec2Operations = createEc2RunnerClient(new EC2Client({})).forRequest({ signal: undefined });
 
 const LAUNCH_TEMPLATE = 'lt-1';
 const ORG_NAME = 'SomeAwesomeCoder';
@@ -86,7 +88,7 @@ describe('list instances', () => {
 
   it('returns a list of instances (Non JIT)', async () => {
     mockEC2Client.on(DescribeInstancesCommand).resolves(mockRunningInstances);
-    const resp = await listEC2Runners();
+    const resp = await ec2Operations.list();
     expect(resp.length).toBe(1);
     expect(resp).toContainEqual({
       id: 'i-1234',
@@ -100,7 +102,7 @@ describe('list instances', () => {
 
   it('returns a list of instances (JIT)', async () => {
     mockEC2Client.on(DescribeInstancesCommand).resolves(mockRunningInstancesJit);
-    const resp = await listEC2Runners();
+    const resp = await ec2Operations.list();
     expect(resp.length).toBe(1);
     expect(resp).toContainEqual({
       id: 'i-1234',
@@ -121,7 +123,7 @@ describe('list instances', () => {
     });
     mockEC2Client.on(DescribeInstancesCommand).resolves(instances);
 
-    const resp = await listEC2Runners();
+    const resp = await ec2Operations.list();
     expect(resp.length).toBe(1);
     expect(resp).toContainEqual({
       id: instances.Reservations![0].Instances![0].InstanceId!,
@@ -135,13 +137,13 @@ describe('list instances', () => {
 
   it('calls EC2 describe instances', async () => {
     mockEC2Client.on(DescribeInstancesCommand).resolves(mockRunningInstances);
-    await listEC2Runners();
+    await ec2Operations.list();
     expect(mockEC2Client).toHaveReceivedCommand(DescribeInstancesCommand);
   });
 
   it('filters instances on repo name', async () => {
     mockEC2Client.on(DescribeInstancesCommand).resolves(mockRunningInstances);
-    await listEC2Runners({
+    await ec2Operations.list({
       runnerType: 'Repo',
       runnerOwner: REPO_NAME,
       environment: undefined,
@@ -158,7 +160,7 @@ describe('list instances', () => {
 
   it('filters instances on org name', async () => {
     mockEC2Client.on(DescribeInstancesCommand).resolves(mockRunningInstances);
-    await listEC2Runners({
+    await ec2Operations.list({
       runnerType: 'Org',
       runnerOwner: ORG_NAME,
       environment: undefined,
@@ -175,7 +177,7 @@ describe('list instances', () => {
 
   it('filters instances on environment', async () => {
     mockEC2Client.on(DescribeInstancesCommand).resolves(mockRunningInstances);
-    await listEC2Runners({ environment: ENVIRONMENT });
+    await ec2Operations.list({ environment: ENVIRONMENT });
     expect(mockEC2Client).toHaveReceivedCommandWith(DescribeInstancesCommand, {
       Filters: [
         { Name: 'instance-state-name', Values: ['running', 'pending'] },
@@ -191,7 +193,7 @@ describe('list instances', () => {
       Value: 'true',
     });
     mockEC2Client.on(DescribeInstancesCommand).resolves(mockRunningInstances);
-    await listEC2Runners({ environment: ENVIRONMENT, orphan: true });
+    await ec2Operations.list({ environment: ENVIRONMENT, orphan: true });
     expect(mockEC2Client).toHaveReceivedCommandWith(DescribeInstancesCommand, {
       Filters: [
         { Name: 'instance-state-name', Values: ['running', 'pending'] },
@@ -207,7 +209,7 @@ describe('list instances', () => {
       Reservations: undefined,
     };
     mockEC2Client.on(DescribeInstancesCommand).resolves(noInstances);
-    const resp = await listEC2Runners();
+    const resp = await ec2Operations.list();
     expect(resp.length).toBe(0);
   });
 
@@ -226,13 +228,13 @@ describe('list instances', () => {
       ],
     };
     mockEC2Client.on(DescribeInstancesCommand).resolves(noInstances);
-    const resp = await listEC2Runners();
+    const resp = await ec2Operations.list();
     expect(resp.length).toBe(1);
   });
 
   it('Filter instances for state running.', async () => {
     mockEC2Client.on(DescribeInstancesCommand).resolves(mockRunningInstances);
-    await listEC2Runners({ statuses: ['running'] });
+    await ec2Operations.list({ statuses: ['running'] });
     expect(mockEC2Client).toHaveReceivedCommandWith(DescribeInstancesCommand, {
       Filters: [
         { Name: 'instance-state-name', Values: ['running'] },
@@ -243,7 +245,7 @@ describe('list instances', () => {
 
   it('Filter instances with status undefined, fall back to defaults.', async () => {
     mockEC2Client.on(DescribeInstancesCommand).resolves(mockRunningInstances);
-    await listEC2Runners({ statuses: undefined });
+    await ec2Operations.list({ statuses: undefined });
     expect(mockEC2Client).toHaveReceivedCommandWith(DescribeInstancesCommand, {
       Filters: [
         { Name: 'instance-state-name', Values: ['running', 'pending'] },
@@ -264,7 +266,7 @@ describe('terminate runner', () => {
       owner: 'owner-2',
       type: 'Repo',
     };
-    await terminateRunner(runner.id);
+    await ec2Operations.terminate(runner.id);
 
     expect(mockEC2Client).toHaveReceivedCommandWith(TerminateInstancesCommand, {
       InstanceIds: [runner.id],
@@ -283,7 +285,7 @@ describe('tag runner', () => {
       owner: 'owner-2',
       type: 'Repo',
     };
-    await tag(runner.id, [{ Key: 'ghr:orphan', Value: 'true' }]);
+    await ec2Operations.tag(runner.id, [{ Key: 'ghr:orphan', Value: 'true' }]);
 
     expect(mockEC2Client).toHaveReceivedCommandWith(CreateTagsCommand, {
       Resources: [runner.id],
@@ -303,16 +305,48 @@ describe('untag runner', () => {
       owner: 'owner-2',
       type: 'Repo',
     };
-    await tag(runner.id, [{ Key: 'ghr:orphan', Value: 'true' }]);
+    await ec2Operations.tag(runner.id, [{ Key: 'ghr:orphan', Value: 'true' }]);
     expect(mockEC2Client).toHaveReceivedCommandWith(CreateTagsCommand, {
       Resources: [runner.id],
       Tags: [{ Key: 'ghr:orphan', Value: 'true' }],
     });
-    await untag(runner.id, [{ Key: 'ghr:orphan', Value: 'true' }]);
+    await ec2Operations.untag(runner.id, [{ Key: 'ghr:orphan', Value: 'true' }]);
     expect(mockEC2Client).toHaveReceivedCommandWith(DeleteTagsCommand, {
       Resources: [runner.id],
       Tags: [{ Key: 'ghr:orphan', Value: 'true' }],
     });
+  });
+});
+
+describe('runner client', () => {
+  it('loads the default EBS block device name through the bound EC2 client and request signal', async () => {
+    const send = vi.fn().mockResolvedValue({
+      LaunchTemplateVersions: [
+        {
+          LaunchTemplateData: {
+            BlockDeviceMappings: [
+              { DeviceName: '/dev/sdb', VirtualName: 'ephemeral0' },
+              { DeviceName: '/dev/sdf', Ebs: {} },
+            ],
+          },
+        },
+      ],
+    });
+    const ec2Client = { send } as unknown as EC2Client;
+    const abortController = new AbortController();
+    const operations = createEc2RunnerClient(ec2Client).forRequest({ signal: abortController.signal });
+
+    await expect(operations.getDefaultBlockDeviceNameFromLaunchTemplate('lt-1')).resolves.toBe('/dev/sdf');
+    expect(send).toHaveBeenCalledOnce();
+    const [command, options] = send.mock.calls[0] as [
+      DescribeLaunchTemplateVersionsCommand,
+      { abortSignal: AbortSignal },
+    ];
+    expect(command.input).toEqual({
+      LaunchTemplateName: 'lt-1',
+      Versions: ['$Default'],
+    });
+    expect(options).toEqual({ abortSignal: abortController.signal });
   });
 });
 
@@ -321,7 +355,6 @@ describe('create runner', () => {
     allocationStrategy: SpotAllocationStrategy.CAPACITY_OPTIMIZED,
     capacityType: 'spot',
     type: 'Org',
-    scaleErrors: ['UnfulfillableCapacity', 'MaxSpotInstanceCountExceeded'],
     source: 'scale-up-lambda',
   };
 
@@ -343,7 +376,7 @@ describe('create runner', () => {
   });
 
   it.each(RUNNER_TYPES)('calls create fleet of 1 instance with the default config for %p', async (type: RunnerType) => {
-    await createRunner(createRunnerConfig({ ...defaultRunnerConfig, type: type }));
+    await ec2Operations.create(createRunnerConfig({ ...defaultRunnerConfig, type: type }));
 
     expect(mockEC2Client).toHaveReceivedCommandWith(CreateFleetCommand, {
       ...expectedCreateFleetRequest({
@@ -358,7 +391,7 @@ describe('create runner', () => {
 
     mockEC2Client.on(CreateFleetCommand).resolves({ Instances: instances });
 
-    await createRunner({
+    await ec2Operations.create({
       ...createRunnerConfig(defaultRunnerConfig),
       numberOfRunners: 2,
     });
@@ -371,12 +404,12 @@ describe('create runner', () => {
     });
   });
 
-  it('calls create fleet of multiple instances with pool-lambda source when specified', async () => {
+  it('calls create fleet of multiple instances with pool source when specified', async () => {
     const instances = [{ InstanceIds: ['i-1234', 'i-5678', 'i-9012'] }];
 
     mockEC2Client.on(CreateFleetCommand).resolves({ Instances: instances });
 
-    await createRunner({
+    await ec2Operations.create({
       ...createRunnerConfig({ ...defaultRunnerConfig, source: 'pool-lambda' }),
       numberOfRunners: 3,
     });
@@ -391,7 +424,7 @@ describe('create runner', () => {
   });
 
   it('calls create fleet of 1 instance with the on-demand capacity', async () => {
-    await createRunner(
+    await ec2Operations.create(
       createRunnerConfig({ ...defaultRunnerConfig, capacityType: 'on-demand', allocationStrategy: 'lowest-price' }),
     );
     expect(mockEC2Client).toHaveReceivedCommandWith(CreateFleetCommand, {
@@ -404,7 +437,7 @@ describe('create runner', () => {
   });
 
   it('calls create fleet with on-demand capacity and prioritized allocation strategy', async () => {
-    await createRunner(
+    await ec2Operations.create(
       createRunnerConfig({
         ...defaultRunnerConfig,
         capacityType: 'on-demand',
@@ -422,7 +455,7 @@ describe('create runner', () => {
 
   it('calls create fleet with custom instance type priorities', async () => {
     const priorities = { 'm5.large': 10, 'c5.large': 5 };
-    await createRunner(
+    await ec2Operations.create(
       createRunnerConfig({
         ...defaultRunnerConfig,
         capacityType: 'on-demand',
@@ -442,7 +475,7 @@ describe('create runner', () => {
 
   it('calls create fleet with spot capacity-optimized-prioritized and instance type priorities', async () => {
     const priorities = { 'm5.large': 10, 'c5.large': 5 };
-    await createRunner(
+    await ec2Operations.create(
       createRunnerConfig({
         ...defaultRunnerConfig,
         capacityType: 'spot',
@@ -461,7 +494,7 @@ describe('create runner', () => {
   });
 
   it('calls run instances with the on-demand capacity', async () => {
-    await createRunner(createRunnerConfig({ ...defaultRunnerConfig, maxSpotPrice: '0.1' }));
+    await ec2Operations.create(createRunnerConfig({ ...defaultRunnerConfig, maxSpotPrice: '0.1' }));
     expect(mockEC2Client).toHaveReceivedCommandWith(CreateFleetCommand, {
       ...expectedCreateFleetRequest({
         ...defaultExpectedFleetRequestValues,
@@ -472,10 +505,10 @@ describe('create runner', () => {
 
   it('does not create ssm parameters when no instance is created', async () => {
     mockEC2Client.on(CreateFleetCommand).resolves({ Instances: [] });
-    await expect(createRunner(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
+    await expect(ec2Operations.create(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
       instances: [],
-      retryableErrorCount: 0,
-      nonRetryableErrorCount: 1,
+      failedInstanceCount: 1,
+      failureCodes: [],
     });
     expect(mockSSMClient).not.toHaveReceivedCommand(PutParameterCommand);
   });
@@ -487,7 +520,7 @@ describe('create runner', () => {
       },
     };
     mockSSMClient.on(GetParameterCommand).resolves(paramValue);
-    await createRunner(
+    await ec2Operations.create(
       createRunnerConfig({
         ...defaultRunnerConfig,
         amiIdSsmParameterName: 'my-ami-id-param',
@@ -502,10 +535,38 @@ describe('create runner', () => {
       Name: 'my-ami-id-param',
     });
   });
+
+  it('keeps cancellation request-scoped and rejects before calling AWS', async () => {
+    const abortController = new AbortController();
+    const abortReason = new Error('service stopping');
+    const cancelledOperations = createEc2RunnerClient(new EC2Client({})).forRequest({
+      signal: abortController.signal,
+    });
+    abortController.abort(abortReason);
+
+    const runnerParameters = createRunnerConfig(defaultRunnerConfig);
+    await expect(cancelledOperations.create(runnerParameters)).rejects.toThrow('service stopping');
+    expect(mockEC2Client).not.toHaveReceivedCommand(CreateFleetCommand);
+    expect(mockSSMClient).not.toHaveReceivedCommand(GetParameterCommand);
+  });
+
+  it('keeps another request usable when a request sharing the same clients is cancelled', async () => {
+    const abortController = new AbortController();
+    const client = createEc2RunnerClient(new EC2Client({}));
+    const cancelledRequest = client.forRequest({ signal: abortController.signal });
+    const activeRequest = client.forRequest({ signal: undefined });
+    mockEC2Client.on(DescribeInstancesCommand).resolves({ Reservations: [] });
+    abortController.abort(new Error('service stopping'));
+
+    await expect(cancelledRequest.list()).rejects.toThrow('service stopping');
+    await expect(activeRequest.list()).resolves.toEqual([]);
+    expect(mockEC2Client).toHaveReceivedCommandTimes(DescribeInstancesCommand, 1);
+  });
+
   it('calls create fleet of 1 instance with runner tracing enabled', async () => {
     tracer.getRootXrayTraceId = vi.fn().mockReturnValue('123');
 
-    await createRunner(createRunnerConfig({ ...defaultRunnerConfig, tracingEnabled: true }));
+    await ec2Operations.create(createRunnerConfig({ ...defaultRunnerConfig, tracingEnabled: true }));
 
     expect(mockEC2Client).toHaveReceivedCommandWith(CreateFleetCommand, {
       ...expectedCreateFleetRequest({
@@ -516,7 +577,7 @@ describe('create runner', () => {
   });
 
   it('calls create fleet with source set to scale-up-lambda when source is specified', async () => {
-    await createRunner(createRunnerConfig({ ...defaultRunnerConfig, source: 'scale-up-lambda' }));
+    await ec2Operations.create(createRunnerConfig({ ...defaultRunnerConfig, source: 'scale-up-lambda' }));
 
     expect(mockEC2Client).toHaveReceivedCommandWith(CreateFleetCommand, {
       ...expectedCreateFleetRequest({
@@ -527,7 +588,7 @@ describe('create runner', () => {
   });
 
   it('calls create fleet with source set to pool-lambda when source is specified', async () => {
-    await createRunner(createRunnerConfig({ ...defaultRunnerConfig, source: 'pool-lambda' }));
+    await ec2Operations.create(createRunnerConfig({ ...defaultRunnerConfig, source: 'pool-lambda' }));
 
     expect(mockEC2Client).toHaveReceivedCommandWith(CreateFleetCommand, {
       ...expectedCreateFleetRequest({
@@ -538,7 +599,7 @@ describe('create runner', () => {
   });
 
   it('overrides SubnetId when specified in ec2OverrideConfig', async () => {
-    await createRunner({
+    await ec2Operations.create({
       ...createRunnerConfig(defaultRunnerConfig),
       ec2OverrideConfig: {
         SubnetId: 'subnet-override',
@@ -577,7 +638,7 @@ describe('create runner', () => {
   });
 
   it('overrides InstanceType when specified in ec2OverrideConfig', async () => {
-    await createRunner({
+    await ec2Operations.create({
       ...createRunnerConfig(defaultRunnerConfig),
       ec2OverrideConfig: {
         InstanceType: 't3.xlarge',
@@ -616,7 +677,7 @@ describe('create runner', () => {
   });
 
   it('overrides ImageId when specified in ec2OverrideConfig', async () => {
-    await createRunner({
+    await ec2Operations.create({
       ...createRunnerConfig(defaultRunnerConfig),
       ec2OverrideConfig: {
         ImageId: 'ami-override-123',
@@ -667,7 +728,7 @@ describe('create runner', () => {
   });
 
   it('overrides all three fields (SubnetId, InstanceType, ImageId) when specified in ec2OverrideConfig', async () => {
-    await createRunner({
+    await ec2Operations.create({
       ...createRunnerConfig(defaultRunnerConfig),
       ec2OverrideConfig: {
         SubnetId: 'subnet-custom',
@@ -705,7 +766,7 @@ describe('create runner', () => {
   });
 
   it('spreads additional ec2OverrideConfig properties to Overrides', async () => {
-    await createRunner({
+    await ec2Operations.create({
       ...createRunnerConfig(defaultRunnerConfig),
       ec2OverrideConfig: {
         SubnetId: 'subnet-override',
@@ -752,7 +813,6 @@ describe('create runner with errors', () => {
     allocationStrategy: SpotAllocationStrategy.CAPACITY_OPTIMIZED,
     capacityType: 'spot',
     type: 'Repo',
-    scaleErrors: ['UnfulfillableCapacity', 'MaxSpotInstanceCountExceeded'],
     source: 'scale-up-lambda',
   };
   const defaultExpectedFleetRequestValues: ExpectedFleetRequestValues = {
@@ -772,13 +832,13 @@ describe('create runner with errors', () => {
     mockEC2Client.on(CreateFleetCommand).resolves({ Instances: [] });
   });
 
-  it('returns one retryable error.', async () => {
+  it('returns the Fleet failure code', async () => {
     createFleetMockWithErrors(['UnfulfillableCapacity']);
 
-    await expect(createRunner(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
+    await expect(ec2Operations.create(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
       instances: [],
-      retryableErrorCount: 1,
-      nonRetryableErrorCount: 0,
+      failedInstanceCount: 1,
+      failureCodes: ['aws-name:UnfulfillableCapacity'],
     });
     expect(mockEC2Client).toHaveReceivedCommandWith(
       CreateFleetCommand,
@@ -787,23 +847,29 @@ describe('create runner with errors', () => {
     expect(mockSSMClient).not.toHaveReceivedCommand(PutParameterCommand);
   });
 
-  it('returns a retryable error for a transient fleet result error without explicit configuration.', async () => {
+  it('returns a transient Fleet failure code without classifying it', async () => {
     createFleetMockWithErrors(['InternalError']);
 
-    await expect(createRunner(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
+    await expect(ec2Operations.create(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
       instances: [],
-      retryableErrorCount: 1,
-      nonRetryableErrorCount: 0,
+      failedInstanceCount: 1,
+      failureCodes: ['aws-name:InternalError'],
     });
   });
 
-  it('retries every missing instance when Fleet reports any retryable error.', async () => {
+  it('reports every missing instance and all Fleet failure codes', async () => {
     createFleetMockWithErrors(['UnfulfillableCapacity', 'MaxSpotInstanceCountExceeded', 'NotMappedError']);
 
-    await expect(createRunner({ ...createRunnerConfig(defaultRunnerConfig), numberOfRunners: 3 })).resolves.toEqual({
+    await expect(
+      ec2Operations.create({ ...createRunnerConfig(defaultRunnerConfig), numberOfRunners: 3 }),
+    ).resolves.toEqual({
       instances: [],
-      retryableErrorCount: 3,
-      nonRetryableErrorCount: 0,
+      failedInstanceCount: 3,
+      failureCodes: [
+        'aws-name:UnfulfillableCapacity',
+        'aws-name:MaxSpotInstanceCountExceeded',
+        'aws-name:NotMappedError',
+      ],
     });
     expect(mockEC2Client).toHaveReceivedCommandWith(
       CreateFleetCommand,
@@ -816,27 +882,24 @@ describe('create runner with errors', () => {
     createFleetMockWithErrors(Array(12).fill('InsufficientFreeAddressesInSubnet'));
 
     await expect(
-      createRunner({
-        ...createRunnerConfig({
-          ...defaultRunnerConfig,
-          scaleErrors: [...defaultRunnerConfig.scaleErrors, 'InsufficientFreeAddressesInSubnet'],
-        }),
+      ec2Operations.create({
+        ...createRunnerConfig(defaultRunnerConfig),
         numberOfRunners: 35,
       }),
     ).resolves.toEqual({
       instances: [],
-      retryableErrorCount: 35,
-      nonRetryableErrorCount: 0,
+      failedInstanceCount: 35,
+      failureCodes: ['aws-name:InsufficientFreeAddressesInSubnet'],
     });
   });
 
-  it('returns a non-retryable error count for an unmapped error', async () => {
+  it('returns the failure code for an unmapped Fleet error', async () => {
     createFleetMockWithErrors(['NonMappedError']);
 
-    await expect(createRunner(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
+    await expect(ec2Operations.create(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
       instances: [],
-      retryableErrorCount: 0,
-      nonRetryableErrorCount: 1,
+      failedInstanceCount: 1,
+      failureCodes: ['aws-name:NonMappedError'],
     });
     expect(mockEC2Client).toHaveReceivedCommandWith(
       CreateFleetCommand,
@@ -848,10 +911,10 @@ describe('create runner with errors', () => {
   it('returns a created instance without a failure count', async () => {
     createFleetMockWithErrors(['NonMappedError'], ['i-123']);
 
-    await expect(createRunner(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
+    await expect(ec2Operations.create(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
       instances: ['i-123'],
-      retryableErrorCount: 0,
-      nonRetryableErrorCount: 0,
+      failedInstanceCount: 0,
+      failureCodes: [],
     });
     expect(mockEC2Client).toHaveReceivedCommandWith(
       CreateFleetCommand,
@@ -859,13 +922,13 @@ describe('create runner with errors', () => {
     );
   });
 
-  it('returns a non-retryable error count when the create fleet request fails with an unknown exception.', async () => {
+  it('returns the failure code when the CreateFleet request fails with an unknown exception', async () => {
     mockEC2Client.on(CreateFleetCommand).rejects(new Error('Some error'));
 
-    await expect(createRunner(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
+    await expect(ec2Operations.create(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
       instances: [],
-      retryableErrorCount: 0,
-      nonRetryableErrorCount: 1,
+      failedInstanceCount: 1,
+      failureCodes: ['aws-name:Error'],
     });
     expect(mockEC2Client).toHaveReceivedCommandWith(
       CreateFleetCommand,
@@ -874,31 +937,31 @@ describe('create runner with errors', () => {
     expect(mockSSMClient).not.toHaveReceivedCommand(PutParameterCommand);
   });
 
-  it('returns a non-retryable error count when the create fleet request fails with a permanent AWS error.', async () => {
+  it('returns the failure code when the CreateFleet request fails with a permanent AWS error', async () => {
     const error = Object.assign(new Error('Not authorized'), { name: 'UnauthorizedOperation' });
     mockEC2Client.on(CreateFleetCommand).rejects(error);
 
-    await expect(createRunner(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
+    await expect(ec2Operations.create(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
       instances: [],
-      retryableErrorCount: 0,
-      nonRetryableErrorCount: 1,
+      failedInstanceCount: 1,
+      failureCodes: ['aws-name:UnauthorizedOperation'],
     });
   });
 
   it.each(['InvalidAMIID.NotFound', 'InvalidParameterValue', 'InvalidIamInstanceProfile.NotFound'])(
-    'returns a non-retryable error count when CreateFleet fails with %s',
+    'returns the failure code when CreateFleet fails with %s',
     async (errorName) => {
       mockEC2Client.on(CreateFleetCommand).rejects(Object.assign(new Error(errorName), { name: errorName }));
 
-      await expect(createRunner(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
+      await expect(ec2Operations.create(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
         instances: [],
-        retryableErrorCount: 0,
-        nonRetryableErrorCount: 1,
+        failedInstanceCount: 1,
+        failureCodes: [`aws-name:${errorName}`],
       });
     },
   );
 
-  it('returns a retryable error count when the create fleet request fails with an AWS server error.', async () => {
+  it('returns all failure identifiers when the CreateFleet request fails with an AWS server error', async () => {
     const error = Object.assign(new Error('Service unavailable'), {
       name: 'UnknownServiceError',
       $fault: 'server',
@@ -906,31 +969,35 @@ describe('create runner with errors', () => {
     });
     mockEC2Client.on(CreateFleetCommand).rejects(error);
 
-    await expect(createRunner(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
+    await expect(ec2Operations.create(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
       instances: [],
-      retryableErrorCount: 1,
-      nonRetryableErrorCount: 0,
+      failedInstanceCount: 1,
+      failureCodes: ['aws-name:UnknownServiceError', 'aws-fault:server', 'aws-http:503'],
     });
   });
 
-  it('returns a non-retryable error count when an AMI parameter is missing', async () => {
+  it('returns the failure chain when an AMI parameter is missing', async () => {
     mockSSMClient
       .on(GetParameterCommand)
       .rejects(Object.assign(new Error('Parameter does not exist'), { name: 'ParameterNotFound' }));
 
     await expect(
-      createRunner(
+      ec2Operations.create(
         createRunnerConfig({
           ...defaultRunnerConfig,
           amiIdSsmParameterName: 'missing-ami-id-param',
         }),
       ),
-    ).resolves.toEqual({ instances: [], retryableErrorCount: 0, nonRetryableErrorCount: 1 });
+    ).resolves.toEqual({
+      instances: [],
+      failedInstanceCount: 1,
+      failureCodes: ['aws-name:GetParameterError', 'aws-name:ParameterNotFound'],
+    });
     expect(mockEC2Client).not.toHaveReceivedCommand(CreateFleetCommand);
     expect(mockSSMClient).not.toHaveReceivedCommand(PutParameterCommand);
   });
 
-  it('returns a retryable error count when the AMI lookup has a transient failure', async () => {
+  it('returns all failure identifiers when the AMI lookup has a transient failure', async () => {
     mockSSMClient.on(GetParameterCommand).rejects(
       Object.assign(new Error('Service unavailable'), {
         name: 'InternalServerError',
@@ -940,42 +1007,50 @@ describe('create runner with errors', () => {
     );
 
     await expect(
-      createRunner(
+      ec2Operations.create(
         createRunnerConfig({
           ...defaultRunnerConfig,
           amiIdSsmParameterName: 'my-ami-id-param',
         }),
       ),
-    ).resolves.toEqual({ instances: [], retryableErrorCount: 1, nonRetryableErrorCount: 0 });
+    ).resolves.toEqual({
+      instances: [],
+      failedInstanceCount: 1,
+      failureCodes: ['aws-name:GetParameterError', 'aws-name:InternalServerError', 'aws-fault:server', 'aws-http:503'],
+    });
     expect(mockEC2Client).not.toHaveReceivedCommand(CreateFleetCommand);
     expect(mockSSMClient).not.toHaveReceivedCommand(PutParameterCommand);
   });
 
-  it('returns a non-retryable error count when the AMI lookup fails with an unknown exception', async () => {
+  it('returns the failure chain when the AMI lookup fails with an unknown exception', async () => {
     mockSSMClient.on(GetParameterCommand).rejects(new Error('Some error'));
 
     await expect(
-      createRunner(
+      ec2Operations.create(
         createRunnerConfig({
           ...defaultRunnerConfig,
           amiIdSsmParameterName: 'my-ami-id-param',
         }),
       ),
-    ).resolves.toEqual({ instances: [], retryableErrorCount: 0, nonRetryableErrorCount: 1 });
+    ).resolves.toEqual({
+      instances: [],
+      failedInstanceCount: 1,
+      failureCodes: ['aws-name:GetParameterError', 'aws-name:Error'],
+    });
     expect(mockEC2Client).not.toHaveReceivedCommand(CreateFleetCommand);
     expect(mockSSMClient).not.toHaveReceivedCommand(PutParameterCommand);
   });
 
-  it('returns a non-scale error count with undefined Instances and Errors.', async () => {
+  it('reports a missing instance when Fleet omits Instances and Errors', async () => {
     mockEC2Client.on(CreateFleetCommand).resolvesOnce({ Instances: undefined, Errors: undefined });
-    await expect(createRunner(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
+    await expect(ec2Operations.create(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
       instances: [],
-      retryableErrorCount: 0,
-      nonRetryableErrorCount: 1,
+      failedInstanceCount: 1,
+      failureCodes: [],
     });
   });
 
-  it('returns a non-scale error count with undefined InstanceIds and ErrorCode.', async () => {
+  it('reports a missing instance when Fleet omits InstanceIds and ErrorCode', async () => {
     mockEC2Client.on(CreateFleetCommand).resolvesOnce({
       Instances: [{ InstanceIds: undefined }],
       Errors: [
@@ -984,10 +1059,10 @@ describe('create runner with errors', () => {
         },
       ],
     });
-    await expect(createRunner(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
+    await expect(ec2Operations.create(createRunnerConfig(defaultRunnerConfig))).resolves.toEqual({
       instances: [],
-      retryableErrorCount: 0,
-      nonRetryableErrorCount: 1,
+      failedInstanceCount: 1,
+      failureCodes: [],
     });
   });
 });
@@ -998,7 +1073,6 @@ describe('create runner with errors fail over to OnDemand', () => {
     capacityType: 'spot',
     type: 'Repo',
     onDemandFailoverOnError: ['InsufficientInstanceCapacity'],
-    scaleErrors: ['UnfulfillableCapacity', 'MaxSpotInstanceCountExceeded'],
     source: 'scale-up-lambda',
   };
   const defaultExpectedFleetRequestValues: ExpectedFleetRequestValues = {
@@ -1022,11 +1096,11 @@ describe('create runner with errors fail over to OnDemand', () => {
     const instancesIds = ['i-123'];
     createFleetMockWithWithOnDemandFallback(['InsufficientInstanceCapacity'], instancesIds);
 
-    const instancesResult = await createRunner(createRunnerConfig(defaultRunnerConfig));
+    const instancesResult = await ec2Operations.create(createRunnerConfig(defaultRunnerConfig));
     expect(instancesResult).toEqual({
       instances: instancesIds,
-      retryableErrorCount: 0,
-      nonRetryableErrorCount: 0,
+      failedInstanceCount: 0,
+      failureCodes: [],
     });
 
     expect(mockEC2Client).toHaveReceivedCommandTimes(CreateFleetCommand, 2);
@@ -1052,28 +1126,34 @@ describe('create runner with errors fail over to OnDemand', () => {
   });
 
   it('test InsufficientInstanceCapacity no fallback.', async () => {
+    createFleetMockWithErrors(['InsufficientInstanceCapacity']);
+
     await expect(
-      createRunner(
+      ec2Operations.create(
         createRunnerConfig({
           ...defaultRunnerConfig,
           onDemandFailoverOnError: [],
         }),
       ),
-    ).resolves.toEqual({ instances: [], retryableErrorCount: 0, nonRetryableErrorCount: 1 });
+    ).resolves.toEqual({
+      instances: [],
+      failedInstanceCount: 1,
+      failureCodes: ['aws-name:InsufficientInstanceCapacity'],
+    });
   });
 
   it('test InsufficientInstanceCapacity with multiple instances and fallback to on demand .', async () => {
     const instancesIds = ['i-123', 'i-456'];
     createFleetMockWithWithOnDemandFallback(['InsufficientInstanceCapacity'], instancesIds);
 
-    const instancesResult = await createRunner({
+    const instancesResult = await ec2Operations.create({
       ...createRunnerConfig(defaultRunnerConfig),
       numberOfRunners: 2,
     });
     expect(instancesResult).toEqual({
       instances: instancesIds,
-      retryableErrorCount: 0,
-      nonRetryableErrorCount: 0,
+      failedInstanceCount: 0,
+      failureCodes: [],
     });
 
     expect(mockEC2Client).toHaveReceivedCommandTimes(CreateFleetCommand, 2);
@@ -1098,17 +1178,21 @@ describe('create runner with errors fail over to OnDemand', () => {
     });
   });
 
-  it('returns created instances and retryable failures without fallback to on demand.', async () => {
+  it('returns created instances and failure details without fallback to on demand', async () => {
     const instancesIds = ['i-123', 'i-456'];
     // fallback to on demand for UnfulfillableCapacity but InsufficientInstanceCapacity is thrown
     createFleetMockWithWithOnDemandFallback(['UnfulfillableCapacity'], instancesIds);
 
     await expect(
-      createRunner({
+      ec2Operations.create({
         ...createRunnerConfig(defaultRunnerConfig),
         numberOfRunners: 2,
       }),
-    ).resolves.toEqual({ instances: ['i-123'], retryableErrorCount: 1, nonRetryableErrorCount: 0 });
+    ).resolves.toEqual({
+      instances: ['i-123'],
+      failedInstanceCount: 1,
+      failureCodes: ['aws-name:UnfulfillableCapacity'],
+    });
 
     expect(mockEC2Client).toHaveReceivedCommandTimes(CreateFleetCommand, 1);
 
@@ -1169,8 +1253,7 @@ interface RunnerConfig {
   amiIdSsmParameterName?: string;
   tracingEnabled?: boolean;
   onDemandFailoverOnError?: string[];
-  scaleErrors: string[];
-  source: LambdaRunnerSource;
+  source: RunnerSource;
   useDedicatedHost?: boolean;
   ec2OverrideConfig?: Ec2OverrideConfig;
 }
@@ -1193,7 +1276,6 @@ function createRunnerConfig(runnerConfig: RunnerConfig): RunnerInputParameters {
     amiIdSsmParameterName: runnerConfig.amiIdSsmParameterName,
     tracingEnabled: runnerConfig.tracingEnabled,
     onDemandFailoverOnError: runnerConfig.onDemandFailoverOnError,
-    scaleErrors: runnerConfig.scaleErrors,
     source: runnerConfig.source,
     useDedicatedHost: runnerConfig.useDedicatedHost,
     ec2OverrideConfig: runnerConfig.ec2OverrideConfig,
@@ -1209,7 +1291,7 @@ interface ExpectedFleetRequestValues {
   totalTargetCapacity: number;
   imageId?: string;
   tracingEnabled?: boolean;
-  source: LambdaRunnerSource;
+  source: RunnerSource;
 }
 
 function expectedCreateFleetRequest(expectedValues: ExpectedFleetRequestValues): CreateFleetCommandInput {
@@ -1318,8 +1400,8 @@ describe('create runner with useDedicatedHost', () => {
   const dedicatedHostRunnerConfig: RunnerConfig = {
     allocationStrategy: SpotAllocationStrategy.CAPACITY_OPTIMIZED,
     capacityType: 'on-demand',
+    source: 'scale-up-lambda',
     type: 'Org',
-    scaleErrors: [],
     useDedicatedHost: true,
   };
 
@@ -1335,12 +1417,12 @@ describe('create runner with useDedicatedHost', () => {
   });
 
   it('uses RunInstances instead of CreateFleet when useDedicatedHost is true', async () => {
-    const result = await createRunner(createRunnerConfig(dedicatedHostRunnerConfig));
+    const result = await ec2Operations.create(createRunnerConfig(dedicatedHostRunnerConfig));
 
     expect(result).toEqual({
       instances: ['i-dedicated-1'],
-      retryableErrorCount: 0,
-      nonRetryableErrorCount: 0,
+      failedInstanceCount: 0,
+      failureCodes: [],
     });
     expect(mockEC2Client).toHaveReceivedCommand(RunInstancesCommand);
     expect(mockEC2Client).not.toHaveReceivedCommand(CreateFleetCommand);
@@ -1349,14 +1431,14 @@ describe('create runner with useDedicatedHost', () => {
   it('uses CreateFleet when useDedicatedHost is false', async () => {
     mockEC2Client.on(CreateFleetCommand).resolves({ Instances: [{ InstanceIds: ['i-fleet-1'] }] });
 
-    const result = await createRunner(
+    const result = await ec2Operations.create(
       createRunnerConfig({
         ...dedicatedHostRunnerConfig,
         useDedicatedHost: false,
       }),
     );
 
-    expect(result).toEqual({ instances: ['i-fleet-1'], retryableErrorCount: 0, nonRetryableErrorCount: 0 });
+    expect(result).toEqual({ instances: ['i-fleet-1'], failedInstanceCount: 0, failureCodes: [] });
     expect(mockEC2Client).toHaveReceivedCommand(CreateFleetCommand);
     expect(mockEC2Client).not.toHaveReceivedCommand(RunInstancesCommand);
   });
@@ -1364,20 +1446,20 @@ describe('create runner with useDedicatedHost', () => {
   it('uses CreateFleet when useDedicatedHost is undefined', async () => {
     mockEC2Client.on(CreateFleetCommand).resolves({ Instances: [{ InstanceIds: ['i-fleet-1'] }] });
 
-    const result = await createRunner(
+    const result = await ec2Operations.create(
       createRunnerConfig({
         ...dedicatedHostRunnerConfig,
         useDedicatedHost: undefined,
       }),
     );
 
-    expect(result).toEqual({ instances: ['i-fleet-1'], retryableErrorCount: 0, nonRetryableErrorCount: 0 });
+    expect(result).toEqual({ instances: ['i-fleet-1'], failedInstanceCount: 0, failureCodes: [] });
     expect(mockEC2Client).toHaveReceivedCommand(CreateFleetCommand);
     expect(mockEC2Client).not.toHaveReceivedCommand(RunInstancesCommand);
   });
 
   it('passes correct parameters to RunInstances', async () => {
-    await createRunner(createRunnerConfig(dedicatedHostRunnerConfig));
+    await ec2Operations.create(createRunnerConfig(dedicatedHostRunnerConfig));
 
     expect(mockEC2Client).toHaveReceivedCommandWith(RunInstancesCommand, {
       LaunchTemplate: {
@@ -1411,20 +1493,21 @@ describe('create runner with useDedicatedHost', () => {
     });
   });
 
-  it('creates multiple instances via RunInstances', async () => {
+  it('creates multiple instances via RunInstances and preserves the caller source', async () => {
     mockEC2Client.on(RunInstancesCommand).resolves({
       Instances: [{ InstanceId: 'i-dedicated-1' }, { InstanceId: 'i-dedicated-2' }],
     });
 
-    const result = await createRunner({
+    const result = await ec2Operations.create({
       ...createRunnerConfig(dedicatedHostRunnerConfig),
       numberOfRunners: 2,
+      source: 'scale-up-lambda',
     });
 
     expect(result).toEqual({
       instances: ['i-dedicated-1', 'i-dedicated-2'],
-      retryableErrorCount: 0,
-      nonRetryableErrorCount: 0,
+      failedInstanceCount: 0,
+      failureCodes: [],
     });
     expect(mockEC2Client).toHaveReceivedCommandWith(RunInstancesCommand, {
       LaunchTemplate: {
@@ -1440,7 +1523,7 @@ describe('create runner with useDedicatedHost', () => {
           ResourceType: 'instance',
           Tags: [
             { Key: 'ghr:Application', Value: 'github-action-runner' },
-            { Key: 'ghr:created_by', Value: 'pool-lambda' },
+            { Key: 'ghr:created_by', Value: 'scale-up-lambda' },
             { Key: 'ghr:Type', Value: 'Org' },
             { Key: 'ghr:Owner', Value: REPO_NAME },
           ],
@@ -1449,7 +1532,7 @@ describe('create runner with useDedicatedHost', () => {
           ResourceType: 'volume',
           Tags: [
             { Key: 'ghr:Application', Value: 'github-action-runner' },
-            { Key: 'ghr:created_by', Value: 'pool-lambda' },
+            { Key: 'ghr:created_by', Value: 'scale-up-lambda' },
             { Key: 'ghr:Type', Value: 'Org' },
             { Key: 'ghr:Owner', Value: REPO_NAME },
           ],
@@ -1458,89 +1541,90 @@ describe('create runner with useDedicatedHost', () => {
     });
   });
 
-  it('returns a non-retryable failure when spot is used with dedicated host', async () => {
+  it('returns a neutral failure when spot is used with a dedicated host', async () => {
     await expect(
-      createRunner(
+      ec2Operations.create(
         createRunnerConfig({
           ...dedicatedHostRunnerConfig,
           capacityType: 'spot',
         }),
       ),
-    ).resolves.toEqual({ instances: [], retryableErrorCount: 0, nonRetryableErrorCount: 1 });
+    ).resolves.toEqual({ instances: [], failedInstanceCount: 1, failureCodes: [] });
     expect(mockEC2Client).not.toHaveReceivedCommand(RunInstancesCommand);
   });
 
-  it('returns a non-retryable failure when RunInstances returns no instances', async () => {
+  it('reports a missing instance when RunInstances returns no instances', async () => {
     mockEC2Client.on(RunInstancesCommand).resolves({ Instances: [] });
 
-    await expect(createRunner(createRunnerConfig(dedicatedHostRunnerConfig))).resolves.toEqual({
+    await expect(ec2Operations.create(createRunnerConfig(dedicatedHostRunnerConfig))).resolves.toEqual({
       instances: [],
-      retryableErrorCount: 0,
-      nonRetryableErrorCount: 1,
+      failedInstanceCount: 1,
+      failureCodes: [],
     });
   });
 
-  it('returns a non-retryable failure when RunInstances fails with an unknown exception', async () => {
+  it('returns the failure code when RunInstances fails with an unknown exception', async () => {
     mockEC2Client.on(RunInstancesCommand).rejects(new Error('EC2 error'));
 
-    await expect(createRunner(createRunnerConfig(dedicatedHostRunnerConfig))).resolves.toEqual({
+    await expect(ec2Operations.create(createRunnerConfig(dedicatedHostRunnerConfig))).resolves.toEqual({
       instances: [],
-      retryableErrorCount: 0,
-      nonRetryableErrorCount: 1,
+      failedInstanceCount: 1,
+      failureCodes: ['aws-name:Error'],
     });
   });
 
-  it('returns a non-retryable failure when RunInstances fails with a permanent AWS error', async () => {
+  it('returns the failure code when RunInstances fails with a permanent AWS error', async () => {
     const error = Object.assign(new Error('Invalid subnet'), { name: 'InvalidSubnetID.NotFound' });
     mockEC2Client.on(RunInstancesCommand).rejects(error);
 
-    await expect(createRunner(createRunnerConfig(dedicatedHostRunnerConfig))).resolves.toEqual({
+    await expect(ec2Operations.create(createRunnerConfig(dedicatedHostRunnerConfig))).resolves.toEqual({
       instances: [],
-      retryableErrorCount: 0,
-      nonRetryableErrorCount: 1,
+      failedInstanceCount: 1,
+      failureCodes: ['aws-name:InvalidSubnetID.NotFound'],
     });
   });
 
-  it('returns retryable failures when RunInstances fails with a network error', async () => {
+  it('returns all failure identifiers when RunInstances fails with a network error', async () => {
     const error = Object.assign(new Error('Connection reset'), { code: 'ECONNRESET' });
     mockEC2Client.on(RunInstancesCommand).rejects(error);
 
-    await expect(createRunner(createRunnerConfig(dedicatedHostRunnerConfig))).resolves.toEqual({
+    await expect(ec2Operations.create(createRunnerConfig(dedicatedHostRunnerConfig))).resolves.toEqual({
       instances: [],
-      retryableErrorCount: 1,
-      nonRetryableErrorCount: 0,
+      failedInstanceCount: 1,
+      failureCodes: ['aws-name:Error', 'aws-code:ECONNRESET'],
     });
   });
 
-  it('returns retryable failures when RunInstances fails with a configured retryable error', async () => {
+  it('returns the AWS failure code when RunInstances fails', async () => {
     const error = Object.assign(new Error('Insufficient capacity'), { name: 'InsufficientInstanceCapacity' });
     mockEC2Client.on(RunInstancesCommand).rejects(error);
 
     await expect(
-      createRunner({
-        ...createRunnerConfig({
-          ...dedicatedHostRunnerConfig,
-          scaleErrors: ['InsufficientInstanceCapacity'],
-        }),
+      ec2Operations.create({
+        ...createRunnerConfig(dedicatedHostRunnerConfig),
         numberOfRunners: 2,
       }),
-    ).resolves.toEqual({ instances: [], retryableErrorCount: 2, nonRetryableErrorCount: 0 });
+    ).resolves.toEqual({
+      instances: [],
+      failedInstanceCount: 2,
+      failureCodes: ['aws-name:InsufficientInstanceCapacity'],
+    });
   });
 
-  it('returns created instances and a non-retryable failure when RunInstances returns fewer instances', async () => {
+  it('returns created instances and the missing instance count when RunInstances returns fewer instances', async () => {
     mockEC2Client.on(RunInstancesCommand).resolves({
       Instances: [{ InstanceId: 'i-dedicated-1' }],
     });
 
     await expect(
-      createRunner({
+      ec2Operations.create({
         ...createRunnerConfig(dedicatedHostRunnerConfig),
         numberOfRunners: 2,
       }),
     ).resolves.toEqual({
       instances: ['i-dedicated-1'],
-      retryableErrorCount: 0,
-      nonRetryableErrorCount: 1,
+      failedInstanceCount: 1,
+      failureCodes: [],
     });
   });
 
@@ -1552,7 +1636,7 @@ describe('create runner with useDedicatedHost', () => {
     };
     mockSSMClient.on(GetParameterCommand).resolves(paramValue);
 
-    await createRunner(
+    await ec2Operations.create(
       createRunnerConfig({
         ...dedicatedHostRunnerConfig,
         amiIdSsmParameterName: 'my-ami-id-param',
@@ -1637,7 +1721,7 @@ describe('create runner with useDedicatedHost', () => {
       WeightedCapacity: 2,
     };
 
-    await createRunner(
+    await ec2Operations.create(
       createRunnerConfig({
         ...dedicatedHostRunnerConfig,
         amiIdSsmParameterName: 'my-ami-id-param',
